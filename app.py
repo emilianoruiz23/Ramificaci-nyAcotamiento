@@ -1,10 +1,13 @@
-﻿import streamlit as st
+import streamlit as st
 import numpy as np
 import math
 from scipy.optimize import linprog
 import graphviz
 
+# Configuración de la página
 st.set_page_config(layout="wide", page_title="Método de Ramificación y Acotamiento")
+
+# --- CLASES Y FUNCIONES DEL ALGORITMO ---
 
 class Node:
     def __init__(self, id, bounds, parent_id=None, branch_desc="Raíz"):
@@ -14,7 +17,7 @@ class Node:
         self.branch_desc = branch_desc
         self.z = None
         self.x = None
-        self.status = "No resuelto" # Puede ser: Factible, Infactible, Agotado, Solución Entera
+        self.status = "No resuelto" # Factible, Infactible, Agotado, Solución Entera
 
 def is_integer(val, tol=1e-5):
     return abs(val - round(val)) < tol
@@ -49,7 +52,7 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
     node_counter = 0
     
     while active_nodes:
-        # Seleccionar el nodo (Exploración en profundidad / LIFO para simplicidad)
+        # LIFO (Profundidad)
         current = active_nodes.pop()
         
         # 1. Resolver el modelo relajado
@@ -67,7 +70,7 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
             current.status = "Agotado (Por Cota)"
             continue
             
-        # Verificar si la solución cumple con las condiciones de integridad
+        # Verificar integridad según el tipo de variable
         is_feasible_integer = True
         branch_var_idx = -1
         branch_val = None
@@ -78,7 +81,7 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
                     is_feasible_integer = False
                     branch_var_idx = i
                     branch_val = current.x[i]
-                    break # Seleccionamos la primera que incumpla (Regla arbitraria como dice la teoría)
+                    break # Primera variable que incumple
                     
         if is_feasible_integer:
             current.status = "Solución Entera"
@@ -110,14 +113,14 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
             node_right = Node(id=node_counter, bounds=right_bounds, parent_id=current.id, branch_desc=desc_r)
             
             nodes.extend([node_left, node_right])
-            # Se añaden a los nodos activos
             active_nodes.extend([node_left, node_right])
 
     return nodes, best_z, best_x
 
 # --- INTERFAZ STREAMLIT ---
+
 st.title("🌳 Método de Ramificación y Acotamiento")
-st.markdown("Basado en modelos Enteros Puros, Mixtos y Binarios.")
+st.markdown("Resolución paso a paso para modelos Enteros Puros, Mixtos y Binarios.")
 
 col_config, col_main = st.columns([1, 2])
 
@@ -162,29 +165,45 @@ with col_main:
         with st.spinner("Construyendo el árbol..."):
             nodes, best_z, best_x = branch_and_bound(c, A_ub, b_ub, var_types, is_max)
             
-            # Crear gráfico
+            # --- CREACIÓN DEL GRÁFICO ---
             dot = graphviz.Digraph(format='png')
-            dot.attr(rankdir='TB', size='8,8')
+            
+            # Ajustes para un árbol más extendido y limpio
+            dot.attr(rankdir='TB', nodesep='0.8', ranksep='1.2', splines='polyline')
+            dot.attr('node', fontname='Helvetica', shape='box', style='filled', margin='0.2')
+            dot.attr('edge', fontname='Helvetica', fontsize='11', fontcolor='darkblue')
             
             for n in nodes:
                 # Determinar color según estado
-                color = "lightblue"
-                if n.status == "Infactible": color = "lightcoral"
-                elif n.status == "Agotado (Por Cota)": color = "lightgrey"
-                elif n.status == "Solución Entera": color = "lightgreen"
+                color = "#e1f5fe" # Azul muy claro por defecto (Ramificado)
+                if n.status == "Infactible": color = "#ffcdd2" # Rojo claro
+                elif n.status == "Agotado (Por Cota)": color = "#f5f5f5" # Gris claro
+                elif n.status == "Solución Entera": color = "#c8e6c9" # Verde claro
                 
-                label = f"Nodo {n.id}\n"
+                # Construir el texto del nodo
+                label = f"NODO {n.id}\n"
+                
+                # Mostrar la restricción que generó este nodo
+                if n.id != 0:
+                    label += f"Añadido: {n.branch_desc}\n"
+                
+                label += "-" * 20 + "\n"
+                
+                # Mostrar Z y las variables verticalmente
                 if n.z is not None:
-                    label += f"Z = {n.z:.2f}\n"
-                    # Mostrar variables
-                    x_str = ", ".join([f"x{i+1}={n.x[i]:.2f}" for i in range(len(n.x))])
-                    label += f"({x_str})\n"
-                label += f"Estado: {n.status}"
+                    label += f"Z = {n.z:.4f}\n"
+                    for i in range(len(n.x)):
+                        label += f"x{i+1} = {n.x[i]:.4f}\n"
                 
-                dot.node(str(n.id), label, style="filled", fillcolor=color, shape="box")
+                label += "-" * 20 + "\n"
+                label += f"[{n.status}]"
                 
+                # Crear el nodo
+                dot.node(str(n.id), label, fillcolor=color)
+                
+                # Crear la flecha con la restricción visible
                 if n.parent_id is not None:
-                    dot.edge(str(n.parent_id), str(n.id), label=n.branch_desc)
+                    dot.edge(str(n.parent_id), str(n.id), label=f" {n.branch_desc} ")
             
             st.success("¡Modelo resuelto!")
             st.write("### Solución Óptima Encontrada")
@@ -195,4 +214,6 @@ with col_main:
                 st.error("No se encontró ninguna solución factible entera/binaria.")
                 
             st.write("### Árbol de Ramificación y Acotamiento")
-            st.graphviz_chart(dot)
+            
+            # Gráfico extendido al tamaño de la pantalla
+            st.graphviz_chart(dot, use_container_width=True)
