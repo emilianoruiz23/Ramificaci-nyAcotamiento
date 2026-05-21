@@ -4,6 +4,8 @@ import math
 from scipy.optimize import linprog
 import graphviz
 import matplotlib.pyplot as plt
+from PIL import Image
+import io
 
 # Configuración de la página
 st.set_page_config(layout="wide", page_title="Método de Ramificación y Acotamiento")
@@ -26,8 +28,7 @@ def is_integer(val, tol=1e-5):
 def solve_relaxation(c, A, b, senses, bounds, is_max):
     c_opt = [-x for x in c] if is_max else c
     
-    A_ub, b_ub = [], []
-    A_eq, b_eq = [], []
+    A_ub, b_ub, A_eq, b_eq = [], [], [], []
     
     for i in range(len(senses)):
         if senses[i] == "<=":
@@ -72,7 +73,6 @@ def branch_and_bound(c, A, b, senses, var_types, is_max):
     
     while active_nodes:
         current = active_nodes.pop()
-        
         success, z, x = solve_relaxation(c, A, b, senses, current.bounds, is_max)
         
         if not success:
@@ -127,7 +127,6 @@ def branch_and_bound(c, A, b, senses, var_types, is_max):
             nodes.extend([node_left, node_right])
             active_nodes.extend([node_left, node_right])
 
-    # Ordenar nodos por ID para mostrarlos correctamente luego
     nodes.sort(key=lambda n: n.id)
     return nodes, best_z, best_x
 
@@ -161,9 +160,7 @@ with col_config:
         var_types.append(t)
         
     st.subheader("Restricciones")
-    A = []
-    b = []
-    senses = []
+    A, b, senses = [], [], []
     for i in range(num_cons):
         st.write(f"Restricción {i+1}")
         cols_r = st.columns(num_vars + 2)
@@ -192,73 +189,90 @@ with col_main:
             else:
                 st.error("No se encontró ninguna solución factible entera/binaria.")
 
+            # --- PREPARAR IMÁGENES PARA EL REPORTE PDF ---
+            pdf_images = []
+            
             # --- 1. MÉTODO GRÁFICO (SOLO PARA 2 VARIABLES) ---
             if num_vars == 2:
                 st.write("### 📈 Método Gráfico y Cortes de Ramificación")
-                st.markdown("Las líneas negras sólidas son las restricciones originales. Las líneas discontinuas de colores representan los subproblemas (cortes de ramificación).")
+                st.markdown("La zona sombreada en verde es la **región factible inicial**. El punto azul es el óptimo lineal relajado.")
                 
-                # Calcular límite máximo del gráfico basado en intercepciones
                 max_val = 5
                 for i in range(len(A)):
                     for j in range(2):
-                        if A[i][j] > 0:
-                            max_val = max(max_val, b[i] / A[i][j])
-                if best_x is not None:
-                    max_val = max(max_val, best_x[0], best_x[1])
-                max_val = math.ceil(max_val * 1.2) # Margen del 20%
+                        if A[i][j] > 0: max_val = max(max_val, b[i] / A[i][j])
+                if best_x is not None: max_val = max(max_val, best_x[0], best_x[1])
+                max_val = math.ceil(max_val * 1.2)
                 
-                fig, ax = plt.subplots(figsize=(7, 5))
-                x_vals = np.linspace(0, max_val, 400)
+                fig, ax = plt.subplots(figsize=(8, 6))
                 
-                # Graficar restricciones originales
+                # Sombreado de la Región Factible
+                d = np.linspace(0, max_val, 400)
+                x_grid, y_grid = np.meshgrid(d, d)
+                feasible_region = np.ones_like(x_grid, dtype=bool)
+                
                 for i in range(len(A)):
                     a1, a2 = A[i][0], A[i][1]
+                    if senses[i] == "<=":
+                        feasible_region &= (a1*x_grid + a2*y_grid <= b[i])
+                    elif senses[i] == ">=":
+                        feasible_region &= (a1*x_grid + a2*y_grid >= b[i])
+                
+                # Dibujar la sombra verde
+                ax.imshow(feasible_region.astype(int), extent=(0, max_val, 0, max_val), origin='lower', cmap='Greens', alpha=0.3)
+                
+                # Graficar restricciones con diferentes colores
+                colors_const = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+                x_vals = np.linspace(0, max_val, 400)
+                
+                for i in range(len(A)):
+                    a1, a2 = A[i][0], A[i][1]
+                    c_color = colors_const[i % len(colors_const)]
                     if a2 != 0:
                         y_vals = (b[i] - a1 * x_vals) / a2
-                        ax.plot(x_vals, y_vals, label=f'R{i+1}: {a1}x1 + {a2}x2 {senses[i]} {b[i]}', color='black', linewidth=1.5)
+                        ax.plot(x_vals, y_vals, label=f'R{i+1}: {a1}x1 + {a2}x2 {senses[i]} {b[i]}', color=c_color, linewidth=2)
                     elif a1 != 0:
-                        ax.axvline(x=b[i]/a1, label=f'R{i+1}: {a1}x1 {senses[i]} {b[i]}', color='black', linewidth=1.5)
+                        ax.axvline(x=b[i]/a1, label=f'R{i+1}: {a1}x1 {senses[i]} {b[i]}', color=c_color, linewidth=2)
                 
-                # Graficar líneas de subproblemas (Ramificaciones)
-                colors = ['red', 'blue', 'green', 'purple', 'orange', 'cyan', 'magenta']
-                c_idx = 0
+                # Marcar la solución Lineal Relajada (Nodo 0)
+                if nodes[0].x is not None:
+                    ax.plot(nodes[0].x[0], nodes[0].x[1], 'bo', markersize=9, label='Óptimo Relajado (Lineal)')
+                
+                # Graficar líneas de subproblemas (Ramificaciones en gris discontinuo)
                 drawn_desc = set()
-                
                 for n in nodes:
                     if n.id != 0 and n.branch_desc and n.branch_desc not in drawn_desc:
                         parts = n.branch_desc.split()
                         if len(parts) == 3:
                             var_str, op, val_str = parts
                             val = float(val_str)
-                            color_to_use = colors[c_idx % len(colors)]
-                            
                             if var_str == 'x1':
-                                ax.axvline(x=val, color=color_to_use, linestyle='--', alpha=0.7, label=f'Corte: {n.branch_desc}')
+                                ax.axvline(x=val, color='gray', linestyle='--', alpha=0.8)
                             elif var_str == 'x2':
-                                ax.axhline(y=val, color=color_to_use, linestyle='--', alpha=0.7, label=f'Corte: {n.branch_desc}')
-                            
+                                ax.axhline(y=val, color='gray', linestyle='--', alpha=0.8)
                             drawn_desc.add(n.branch_desc)
-                            c_idx += 1
                 
-                # Marcar la solución óptima si existe
+                # Marcar la solución óptima entera final si existe
                 if best_x is not None:
-                    ax.plot(best_x[0], best_x[1], 'r*', markersize=12, label='Óptimo Entero/Mixto')
+                    ax.plot(best_x[0], best_x[1], 'r*', markersize=15, label='Óptimo Entero/Mixto (Final)')
 
                 ax.set_xlim(0, max_val)
                 ax.set_ylim(0, max_val)
                 ax.set_xlabel('$x_1$')
                 ax.set_ylabel('$x_2$')
-                # Colocar leyenda fuera del gráfico
                 ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
                 ax.grid(True, alpha=0.3)
                 
                 st.pyplot(fig)
-            else:
-                st.info("El método gráfico solo está disponible para modelos de 2 variables. Revisa el árbol y la evidencia matemática abajo.")
+                
+                # Guardar gráfico en memoria para el PDF
+                buf_fig = io.BytesIO()
+                fig.savefig(buf_fig, format='png', bbox_inches='tight', dpi=150)
+                buf_fig.seek(0)
+                pdf_images.append(Image.open(buf_fig).convert('RGB'))
 
             # --- 2. CREACIÓN DEL ÁRBOL ---
             st.write("### 🌳 Árbol de Ramificación y Acotamiento")
-            
             dot = graphviz.Digraph(format='png')
             dot.attr(rankdir='TB', nodesep='0.4', ranksep='0.6', splines='polyline')
             dot.attr('node', fontname='Helvetica', shape='box', style='filled', margin='0.1', fontsize='10')
@@ -271,8 +285,7 @@ with col_main:
                 elif n.status == "Solución Entera": color = "#c8e6c9" 
                 
                 label = f"NODO {n.id}\n"
-                if n.id != 0:
-                    label += f"({n.branch_desc})\n"
+                if n.id != 0: label += f"({n.branch_desc})\n"
                 
                 if n.z is not None:
                     label += "-" * 15 + "\n"
@@ -282,66 +295,62 @@ with col_main:
                 
                 label += "-" * 15 + "\n"
                 label += f"[{n.status}]"
-                
                 dot.node(str(n.id), label, fillcolor=color)
-                
                 if n.parent_id is not None:
                     dot.edge(str(n.parent_id), str(n.id), label=f" {n.branch_desc} ")
             
-            # Gráfico y botón PDF
-            col_pdf, col_empty = st.columns([1, 2])
-            with col_pdf:
-                pdf_bytes = dot.pipe(format='pdf')
-                st.download_button(
-                    label="📄 Descargar Árbol en PDF",
-                    data=pdf_bytes,
-                    file_name="Arbol_Ramificacion.pdf",
-                    mime="application/pdf"
-                )
-            
             st.graphviz_chart(dot, use_container_width=True)
+            
+            # Guardar árbol en memoria para el PDF
+            tree_png = dot.pipe(format='png')
+            img_tree = Image.open(io.BytesIO(tree_png)).convert('RGB')
+            pdf_images.append(img_tree)
+            
+            # Generar el PDF final Unificado
+            if len(pdf_images) > 0:
+                pdf_buffer = io.BytesIO()
+                # Guarda la primera imagen y adjunta las demás como páginas extra
+                pdf_images[0].save(
+                    pdf_buffer, 
+                    format='PDF', 
+                    save_all=True, 
+                    append_images=pdf_images[1:] if len(pdf_images) > 1 else []
+                )
+                
+                st.download_button(
+                    label="📄 Descargar Reporte Completo (Gráfico + Árbol en PDF)",
+                    data=pdf_buffer.getvalue(),
+                    file_name="Reporte_Ramificacion.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
 
             # --- 3. EVIDENCIA DE SUBPROBLEMAS ---
-            st.write("### 📝 Evidencia de Subproblemas (Modelos Evaluados)")
-            st.markdown("Desglose del modelo matemático resuelto en cada nodo del árbol.")
-            
-            with st.expander("Ver desglose completo de nodos", expanded=True):
+            st.write("### 📝 Evidencia de Subproblemas")
+            with st.expander("Ver desglose completo de nodos", expanded=False):
                 for n in nodes:
                     padre = f"Hijo del Nodo {n.parent_id}" if n.parent_id is not None else "Nodo Raíz"
                     st.markdown(f"#### Nodo {n.id} ({padre})")
+                    if n.id != 0: st.markdown(f"**Restricción añadida:** $ {n.branch_desc} $")
                     
-                    if n.id != 0:
-                        st.markdown(f"**Restricción añadida en la ramificación:** $ {n.branch_desc} $")
-                    
-                    # Formatear los límites activos para este subproblema
                     bounds_str = []
                     for i, bnd in enumerate(n.bounds):
-                        if bnd[0] == 0 and bnd[1] is None:
-                            bounds_str.append(f"$x_{i+1} \\ge 0$")
+                        if bnd[0] == 0 and bnd[1] is None: bounds_str.append(f"$x_{i+1} \\ge 0$")
                         else:
-                            if bnd[0] == bnd[1]:
-                                bounds_str.append(f"$x_{i+1} = {bnd[0]}$")
+                            if bnd[0] == bnd[1]: bounds_str.append(f"$x_{i+1} = {bnd[0]}$")
                             else:
-                                if bnd[0] is not None and bnd[0] > 0:
-                                    bounds_str.append(f"$x_{i+1} \\ge {bnd[0]}$")
-                                if bnd[1] is not None:
-                                    bounds_str.append(f"$x_{i+1} \\le {bnd[1]}$")
+                                if bnd[0] is not None and bnd[0] > 0: bounds_str.append(f"$x_{i+1} \\ge {bnd[0]}$")
+                                if bnd[1] is not None: bounds_str.append(f"$x_{i+1} \\le {bnd[1]}$")
                     
                     st.markdown("**Límites activos evaluados:** " + ", ".join(bounds_str))
                     
-                    # Resultado del subproblema
                     if n.status == "Infactible":
-                        st.error(f"**Estado:** {n.status}. No hay región factible para este conjunto de límites.")
+                        st.error(f"**Estado:** {n.status}. No hay región factible.")
                     else:
-                        if n.status == "Solución Entera":
-                            st.success(f"**Estado:** {n.status}. Z = {n.z:.4f}")
-                        elif n.status == "Agotado (Por Cota)":
-                            st.warning(f"**Estado:** {n.status}. Z = {n.z:.4f} (No mejora la solución conocida)")
-                        else:
-                            st.info(f"**Estado:** {n.status}. Z = {n.z:.4f}")
+                        if n.status == "Solución Entera": st.success(f"**Estado:** {n.status}. Z = {n.z:.4f}")
+                        elif n.status == "Agotado (Por Cota)": st.warning(f"**Estado:** {n.status}. Z = {n.z:.4f}")
+                        else: st.info(f"**Estado:** {n.status}. Z = {n.z:.4f}")
                         
-                        # Mostrar variables del resultado
                         x_res = ", ".join([f"$x_{i+1} = {n.x[i]:.4f}$" for i in range(len(n.x))])
                         st.markdown(f"**Variables:** {x_res}")
-                    
                     st.markdown("---")
