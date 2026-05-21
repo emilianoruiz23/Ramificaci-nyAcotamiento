@@ -12,30 +12,50 @@ st.set_page_config(layout="wide", page_title="Método de Ramificación y Acotami
 class Node:
     def __init__(self, id, bounds, parent_id=None, branch_desc="Raíz"):
         self.id = id
-        self.bounds = bounds # Lista de tuplas (min, max) para cada variable
+        self.bounds = bounds
         self.parent_id = parent_id
         self.branch_desc = branch_desc
         self.z = None
         self.x = None
-        self.status = "No resuelto" # Factible, Infactible, Agotado, Solución Entera
+        self.status = "No resuelto"
 
 def is_integer(val, tol=1e-5):
     return abs(val - round(val)) < tol
 
-def solve_relaxation(c, A_ub, b_ub, bounds, is_max):
-    # linprog minimiza por defecto. Si es max, invertimos c
+def solve_relaxation(c, A, b, senses, bounds, is_max):
     c_opt = [-x for x in c] if is_max else c
-    res = linprog(c_opt, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+    
+    A_ub, b_ub = [], []
+    A_eq, b_eq = [], []
+    
+    # Procesar tipos de restricciones
+    for i in range(len(senses)):
+        if senses[i] == "<=":
+            A_ub.append(A[i])
+            b_ub.append(b[i])
+        elif senses[i] == ">=":
+            A_ub.append([-val for val in A[i]]) # Multiplicar por -1 para linprog
+            b_ub.append(-b[i])
+        elif senses[i] == "==":
+            A_eq.append(A[i])
+            b_eq.append(b[i])
+            
+    # Manejar listas vacías para scipy
+    A_ub = A_ub if len(A_ub) > 0 else None
+    b_ub = b_ub if len(b_ub) > 0 else None
+    A_eq = A_eq if len(A_eq) > 0 else None
+    b_eq = b_eq if len(b_eq) > 0 else None
+
+    res = linprog(c_opt, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
     
     if res.success:
         z = -res.fun if is_max else res.fun
         return True, z, res.x
     return False, None, None
 
-def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
+def branch_and_bound(c, A, b, senses, var_types, is_max):
     num_vars = len(c)
     
-    # Inicializar límites: continuas/enteras [0, inf], binarias [0, 1]
     initial_bounds = []
     for t in var_types:
         if t == 'Binaria (B)':
@@ -52,25 +72,21 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
     node_counter = 0
     
     while active_nodes:
-        # LIFO (Profundidad)
         current = active_nodes.pop()
         
-        # 1. Resolver el modelo relajado
-        success, z, x = solve_relaxation(c, A_ub, b_ub, current.bounds, is_max)
+        success, z, x = solve_relaxation(c, A, b, senses, current.bounds, is_max)
         
         if not success:
             current.status = "Infactible"
             continue
             
         current.z = z
-        current.x = np.round(x, 5) # Redondear para evitar errores de coma flotante
+        current.x = np.round(x, 5)
         
-        # 4. Analizar la cota (Problema agotado)
         if (is_max and z <= best_z) or (not is_max and z >= best_z):
             current.status = "Agotado (Por Cota)"
             continue
             
-        # Verificar integridad según el tipo de variable
         is_feasible_integer = True
         branch_var_idx = -1
         branch_val = None
@@ -81,7 +97,7 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
                     is_feasible_integer = False
                     branch_var_idx = i
                     branch_val = current.x[i]
-                    break # Primera variable que incumple
+                    break
                     
         if is_feasible_integer:
             current.status = "Solución Entera"
@@ -89,24 +105,21 @@ def branch_and_bound(c, A_ub, b_ub, var_types, is_max):
             best_x = current.x
         else:
             current.status = "Ramificado"
-            # 3. Crear subproblemas
             node_counter += 1
             left_bounds = current.bounds.copy()
             right_bounds = current.bounds.copy()
             
             if var_types[branch_var_idx] == 'Binaria (B)':
-                # Modelo Binario: x=0 y x=1
                 left_bounds[branch_var_idx] = (0, 0)
                 right_bounds[branch_var_idx] = (1, 1)
-                desc_l = f"x{branch_var_idx+1} = 0"
-                desc_r = f"x{branch_var_idx+1} = 1"
+                desc_l = f"x{branch_var_idx+1}=0"
+                desc_r = f"x{branch_var_idx+1}=1"
             else:
-                # Modelo Entero: x <= piso, x >= piso + 1
                 floor_val = math.floor(branch_val)
                 left_bounds[branch_var_idx] = (left_bounds[branch_var_idx][0], floor_val)
                 right_bounds[branch_var_idx] = (floor_val + 1, right_bounds[branch_var_idx][1])
-                desc_l = f"x{branch_var_idx+1} <= {floor_val}"
-                desc_r = f"x{branch_var_idx+1} >= {floor_val + 1}"
+                desc_l = f"x{branch_var_idx+1}<={floor_val}"
+                desc_r = f"x{branch_var_idx+1}>={floor_val + 1}"
             
             node_left = Node(id=node_counter, bounds=left_bounds, parent_id=current.id, branch_desc=desc_l)
             node_counter += 1
@@ -125,7 +138,7 @@ st.markdown("Resolución paso a paso para modelos Enteros Puros, Mixtos y Binari
 col_config, col_main = st.columns([1, 2])
 
 with col_config:
-    st.header("Configuración del Modelo")
+    st.header("Configuración")
     opt_type = st.selectbox("Objetivo:", ["Maximizar", "Minimizar"])
     is_max = opt_type == "Maximizar"
     
@@ -143,77 +156,91 @@ with col_config:
     var_types = []
     cols_t = st.columns(num_vars)
     for i in range(num_vars):
-        t = cols_t[i].selectbox(f"Tipo x{i+1}", ["Entera (I)", "Continua (C)", "Binaria (B)"], key=f"t_{i}")
+        t = cols_t[i].selectbox(f"x{i+1}", ["Entera (I)", "Continua (C)", "Binaria (B)"], key=f"t_{i}")
         var_types.append(t)
         
-    st.subheader("Restricciones (<=)")
-    A_ub = []
-    b_ub = []
+    st.subheader("Restricciones")
+    A = []
+    b = []
+    senses = []
     for i in range(num_cons):
         st.write(f"Restricción {i+1}")
-        cols_r = st.columns(num_vars + 1)
+        # num_vars + 2 columnas (para variables, tipo de signo y resultado)
+        cols_r = st.columns(num_vars + 2)
         row = []
         for j in range(num_vars):
-            val = cols_r[j].number_input(f"x{j+1}", value=1.0, key=f"a_{i}_{j}")
+            val = cols_r[j].number_input(f"x{j+1}", value=1.0, key=f"a_{i}_{j}", label_visibility="collapsed")
             row.append(val)
-        A_ub.append(row)
-        b = cols_r[-1].number_input("RHS", value=10.0, key=f"b_{i}")
-        b_ub.append(b)
+        A.append(row)
+        
+        # Selector de tipo de restricción (<=, >=, ==)
+        sense = cols_r[-2].selectbox("Tipo", ["<=", ">=", "=="], key=f"s_{i}", label_visibility="collapsed")
+        senses.append(sense)
+        
+        # Lado derecho de la restricción (RHS)
+        b_val = cols_r[-1].number_input("RHS", value=10.0, key=f"b_{i}", label_visibility="collapsed")
+        b.append(b_val)
 
 with col_main:
     if st.button("🚀 Resolver Modelo", type="primary"):
         with st.spinner("Construyendo el árbol..."):
-            nodes, best_z, best_x = branch_and_bound(c, A_ub, b_ub, var_types, is_max)
+            nodes, best_z, best_x = branch_and_bound(c, A, b, senses, var_types, is_max)
             
-            # --- CREACIÓN DEL GRÁFICO ---
+            # --- CREACIÓN DEL GRÁFICO (MÁS COMPACTO) ---
             dot = graphviz.Digraph(format='png')
             
-            # Ajustes para un árbol más extendido y limpio
-            dot.attr(rankdir='TB', nodesep='0.8', ranksep='1.2', splines='polyline')
-            dot.attr('node', fontname='Helvetica', shape='box', style='filled', margin='0.2')
-            dot.attr('edge', fontname='Helvetica', fontsize='11', fontcolor='darkblue')
+            # Ajustes compactos: nodos más pequeños, menos separación
+            dot.attr(rankdir='TB', nodesep='0.4', ranksep='0.6', splines='polyline')
+            dot.attr('node', fontname='Helvetica', shape='box', style='filled', margin='0.1', fontsize='10')
+            dot.attr('edge', fontname='Helvetica', fontsize='9', fontcolor='darkblue')
             
             for n in nodes:
-                # Determinar color según estado
-                color = "#e1f5fe" # Azul muy claro por defecto (Ramificado)
-                if n.status == "Infactible": color = "#ffcdd2" # Rojo claro
-                elif n.status == "Agotado (Por Cota)": color = "#f5f5f5" # Gris claro
-                elif n.status == "Solución Entera": color = "#c8e6c9" # Verde claro
+                color = "#e1f5fe" 
+                if n.status == "Infactible": color = "#ffcdd2" 
+                elif n.status == "Agotado (Por Cota)": color = "#f5f5f5" 
+                elif n.status == "Solución Entera": color = "#c8e6c9" 
                 
-                # Construir el texto del nodo
                 label = f"NODO {n.id}\n"
-                
-                # Mostrar la restricción que generó este nodo
                 if n.id != 0:
-                    label += f"Añadido: {n.branch_desc}\n"
+                    label += f"({n.branch_desc})\n"
                 
-                label += "-" * 20 + "\n"
-                
-                # Mostrar Z y las variables verticalmente
                 if n.z is not None:
-                    label += f"Z = {n.z:.4f}\n"
+                    label += "-" * 15 + "\n"
+                    label += f"Z = {n.z:.3f}\n"
                     for i in range(len(n.x)):
-                        label += f"x{i+1} = {n.x[i]:.4f}\n"
+                        label += f"x{i+1} = {n.x[i]:.3f}\n"
                 
-                label += "-" * 20 + "\n"
+                label += "-" * 15 + "\n"
                 label += f"[{n.status}]"
                 
-                # Crear el nodo
                 dot.node(str(n.id), label, fillcolor=color)
                 
-                # Crear la flecha con la restricción visible
                 if n.parent_id is not None:
                     dot.edge(str(n.parent_id), str(n.id), label=f" {n.branch_desc} ")
             
+            # --- RENDERIZADO Y DESCARGA ---
             st.success("¡Modelo resuelto!")
-            st.write("### Solución Óptima Encontrada")
-            if best_x is not None:
-                st.write(f"**Z:** {best_z:.4f}")
-                st.write("**Variables:**", {f"x{i+1}": best_x[i] for i in range(num_vars)})
-            else:
-                st.error("No se encontró ninguna solución factible entera/binaria.")
-                
-            st.write("### Árbol de Ramificación y Acotamiento")
+            col_res1, col_res2 = st.columns(2)
             
-            # Gráfico extendido al tamaño de la pantalla
+            with col_res1:
+                st.write("### Solución Óptima Encontrada")
+                if best_x is not None:
+                    st.write(f"**Z:** {best_z:.4f}")
+                    st.write("**Variables:**", {f"x{i+1}": best_x[i] for i in range(num_vars)})
+                else:
+                    st.error("No se encontró ninguna solución factible entera/binaria.")
+                    
+            with col_res2:
+                # Generar el PDF y mostrar el botón de descarga
+                pdf_bytes = dot.pipe(format='pdf')
+                st.write("### Exportar")
+                st.download_button(
+                    label="📄 Descargar Árbol Completo (PDF)",
+                    data=pdf_bytes,
+                    file_name="Arbol_Ramificacion.pdf",
+                    mime="application/pdf"
+                )
+                
+            st.write("### Visualización del Árbol")
+            # Gráfico mostrado en pantalla
             st.graphviz_chart(dot, use_container_width=True)
